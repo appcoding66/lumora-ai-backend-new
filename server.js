@@ -2,493 +2,392 @@ import express from "express";
 import cors from "cors";
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.GEMINI_API_KEY;
 
 app.use(cors());
-app.use(express.json({ limit: "30mb" }));
+app.use(express.json({ limit: "15mb" }));
 
-// ================================
+// ===============================
 // GEMINI MODELS
-// ================================
+// ===============================
 
-const CHAT_MODELS = [
+const TEXT_MODELS = [
   "gemini-3.8-flash",
   "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash-lite"
 ];
 
-// ================================
-// LUMORA SYSTEM PROMPT
-// ================================
+const IMAGE_MODEL = "gemini-3.1-flash-image";
 
-const SYSTEM_PROMPT = `
+// ===============================
+// LUMORA AI SYSTEM INSTRUCTION
+// ===============================
+
+const SYSTEM = `
 You are Lumora AI, a general-purpose AI assistant.
 
-Your job is to understand the user's actual request and help complete
-the task directly.
+IMPORTANT TASK RULE:
+The LATEST user message is ALWAYS the CURRENT TASK.
+Older messages are context only.
 
-LANGUAGE:
-- Reply in the same language the user is currently using.
-- Bengali -> Bengali.
-- English -> English.
-- Hindi -> Hindi.
-- Banglish -> naturally match Banglish when appropriate.
-- Translate only when explicitly requested.
+If the user changes the topic, immediately switch to the new topic.
+Never continue an old task unless the latest message clearly refers to it.
 
-CONVERSATION:
-- Use the conversation history provided by the application.
-- Understand references such as "এটা", "ওটা", "আগের code",
-  "previous code", "এই ছবিটা", "fix it", and "continue".
-- Continue previous work instead of treating every message as unrelated.
-- Preserve existing functionality when modifying code unless the user
-  explicitly asks to remove something.
+Examples:
+- User asks "What is HTML?" -> explain HTML.
+- Then user asks "Who created you?" -> answer only the creator question.
+- Then user asks "Make HTML for me." -> create the requested HTML.
+- Then user says "There is an error in the HTML, fix it." -> fix that HTML.
 
-CODE:
-- Understand code before modifying it.
-- If the user asks to fix previous code, use the provided history.
-- When practical, provide complete replacement code.
-- Do not unnecessarily remove existing features.
+If the user asks to explain something:
+Explain only that subject.
 
-IMAGES:
-- Analyze uploaded screenshots and images.
-- Read visible text when possible.
-- Explain visible errors and UI elements.
-- Do not claim to see details that are not available.
+If the user asks to create, write, modify, or fix HTML/code:
+Work directly on that exact request.
 
-CURRENT INFORMATION:
-- When current information, recent information, news, official websites,
-  links, or online information is requested, use Google Search grounding
-  when available.
-- Never invent current facts or URLs.
+If the user asks for an email:
+Create a ready-to-copy email with:
+Subject:
+Body:
 
-CREATOR:
-Only when the user explicitly asks who created or developed Lumora AI,
-answer:
+If the user asks about current websites, links, YouTube videos,
+latest information, news, or web information:
+Use Google Search grounding when available.
+
+If the user attaches an image or screenshot:
+Inspect the image and answer based on it.
+
+Always reply in the same language as the latest user message.
+
+CREATOR INFORMATION:
+Only when the user explicitly asks who created, made, or developed you:
 
 Bengali:
-আমি Lumora AI। আমাকে তৈরি ও ডেভেলপ করেছেন অঙ্কুশ মণ্ডল (Ankush Mondal)।
+"আমি Lumora AI। আমাকে তৈরি ও ডেভেলপ করেছেন অঙ্কুশ মণ্ডল (Ankush Mondal)।"
 
 English:
-I am Lumora AI. I was created and developed by Ankush Mondal.
+"I am Lumora AI. I was created and developed by Ankush Mondal."
 
-Do not mention the creator during normal conversations.
-
-Be helpful, direct, and task-oriented.
+Do NOT mention the creator unless the user explicitly asks.
 `;
 
-// ================================
-// SEARCH DETECTION
-// ================================
+// ===============================
+// BUILD CONVERSATION
+// ===============================
 
-function needsSearch(text = "") {
-  const t = text.toLowerCase();
+function buildContents(history, message, image) {
+  const contents = [];
 
-  const words = [
-    "search",
-    "find",
-    "look up",
-    "latest",
-    "today",
-    "current",
-    "recent",
-    "news",
-    "official",
-    "website",
-    "web site",
-    "link",
-    "url",
+  if (Array.isArray(history)) {
+    for (const item of history.slice(-16)) {
+      if (!item || !item.content) continue;
 
-    "সার্চ",
-    "খুঁজে",
-    "খুঁজুন",
-    "ওয়েবসাইট",
-    "ওয়েবসাইট",
-    "লিংক",
-    "লিঙ্ক",
-    "বর্তমান",
-    "আজকের",
-    "সাম্প্রতিক",
-    "খবর"
-  ];
-
-  return words.some(word => t.includes(word));
-}
-
-// ================================
-// IMAGE DATA PARSER
-// ================================
-
-function parseImage(dataUrl) {
-  if (!dataUrl || typeof dataUrl !== "string") {
-    return null;
-  }
-
-  const match = dataUrl.match(
-    /^data:(image\/[^;]+);base64,(.+)$/s
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  return {
-    mimeType: match[1],
-    data: match[2]
-  };
-}
-
-// ================================
-// HISTORY CLEANER
-// ================================
-
-function cleanHistory(history) {
-  if (!Array.isArray(history)) {
-    return [];
-  }
-
-  return history
-    .slice(-20)
-    .filter(
-      item =>
-        item &&
-        (item.role === "user" || item.role === "model")
-    )
-    .map(item => ({
-      role: item.role,
-      parts: [
-        {
-          text: String(item.content || "").slice(0, 16000)
-        }
-      ]
-    }));
-}
-
-// ================================
-// GEMINI TEXT EXTRACTION
-// ================================
-
-function getText(data) {
-  const parts =
-    data?.candidates?.[0]?.content?.parts || [];
-
-  return parts
-    .filter(part => typeof part.text === "string")
-    .map(part => part.text)
-    .join("\n")
-    .trim();
-}
-
-// ================================
-// SEARCH SOURCE EXTRACTION
-// ================================
-
-function getSources(data) {
-  const chunks =
-    data?.candidates?.[0]?.groundingMetadata
-      ?.groundingChunks || [];
-
-  const sources = [];
-  const seen = new Set();
-
-  for (const chunk of chunks) {
-    const web = chunk?.web;
-
-    if (
-      web?.uri &&
-      !seen.has(web.uri)
-    ) {
-      seen.add(web.uri);
-
-      sources.push({
-        title: web.title || web.uri,
-        url: web.uri
+      contents.push({
+        role: item.role === "assistant" ? "model" : "user",
+        parts: [
+          {
+            text: String(item.content)
+          }
+        ]
       });
     }
   }
 
-  return sources.slice(0, 10);
-}
+  const parts = [
+    {
+      text: "CURRENT TASK:\n" + String(message)
+    }
+  ];
 
-// ================================
-// GEMINI REQUEST
-// ================================
-
-async function callGemini(
-  model,
-  message,
-  history,
-  image
-) {
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  if (!apiKey) {
-    throw new Error(
-      "GEMINI_API_KEY is missing from Render Environment Variables."
-    );
-  }
-
-  const contents = cleanHistory(history);
-
-  const parts = [];
-
-  const imageData = parseImage(image);
-
-  if (imageData) {
+  if (image && image.data) {
     parts.push({
       inlineData: {
-        mimeType: imageData.mimeType,
-        data: imageData.data
+        mimeType: image.mimeType || "image/png",
+        data: image.data
       }
     });
   }
-
-  parts.push({
-    text:
-      String(message || "").trim() ||
-      "Please analyze the uploaded image."
-  });
 
   contents.push({
     role: "user",
     parts
   });
 
-  const body = {
-    systemInstruction: {
-      parts: [
-        {
-          text: SYSTEM_PROMPT
-        }
-      ]
-    },
+  return contents;
+}
 
-    contents,
+// ===============================
+// GEMINI REQUEST
+// ===============================
 
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 8192
+async function callGemini(model, body, version = "v1beta") {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": API_KEY
+      },
+      body: JSON.stringify(body)
     }
-  };
+  );
 
-  // Google Search grounding
-  if (needsSearch(message)) {
-    body.tools = [
-      {
-        googleSearch: {}
-      }
-    ];
-  }
-
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-  const response = await fetch(url, {
-    method: "POST",
-
-    headers: {
-      "Content-Type": "application/json"
-    },
-
-    body: JSON.stringify(body)
-  });
-
-  const raw = await response.text();
-
-  let data;
-
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw new Error(
-      `Gemini returned invalid JSON: ${raw.slice(0, 500)}`
-    );
-  }
+  const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    const error = new Error(
-      data?.error?.message ||
-        `Gemini API error: ${response.status}`
-    );
-
-    error.status = response.status;
-
-    throw error;
-  }
-
-  const answer = getText(data);
-
-  if (!answer) {
     throw new Error(
-      `Gemini returned an empty response using ${model}.`
+      data?.error?.message || `Gemini error ${response.status}`
     );
   }
 
-  return {
-    reply: answer,
-    sources: getSources(data),
-    model
-  };
+  return data;
 }
 
-// ================================
-// FALLBACK CHECK
-// ================================
+// ===============================
+// EXTRACT TEXT
+// ===============================
 
-function shouldFallback(error) {
-  const status = Number(
-    error?.status || 0
-  );
+function extractText(data) {
+  return (data?.candidates || [])
+    .flatMap(candidate => candidate?.content?.parts || [])
+    .map(part => part?.text || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
 
-  const text = String(
-    error?.message || ""
-  ).toLowerCase();
+// ===============================
+// SEARCH DETECTION
+// ===============================
 
-  return (
-    [408, 429, 500, 502, 503, 504].includes(status) ||
-    text.includes("high demand") ||
-    text.includes("unavailable") ||
-    text.includes("overloaded") ||
-    text.includes("resource exhausted") ||
-    text.includes("rate limit")
+function needsSearch(text) {
+  return /search|latest|today|current|news|website|web|link|url|youtube|find|সার্চ|ওয়েবসাইট|লিংক|ইউটিউব|খুঁজে|বর্তমান|আজকের|সর্বশেষ/i.test(
+    text || ""
   );
 }
 
-// ================================
-// ASK LUMORA
-// ================================
-
-async function askLumora(
-  message,
-  history,
-  image
-) {
-  let lastError = null;
-
-  for (const model of CHAT_MODELS) {
-    try {
-      console.log(
-        `Trying Gemini model: ${model}`
-      );
-
-      const result = await callGemini(
-        model,
-        message,
-        history,
-        image
-      );
-
-      console.log(
-        `Gemini success: ${model}`
-      );
-
-      return result;
-
-    } catch (error) {
-      lastError = error;
-
-      console.error(
-        `${model} failed:`,
-        error.message
-      );
-
-      if (!shouldFallback(error)) {
-        break;
-      }
-    }
-  }
-
-  throw (
-    lastError ||
-    new Error(
-      "All Gemini models failed."
-    )
-  );
-}
-
-// ================================
-// ROOT
-// ================================
+// ===============================
+// HOME
+// ===============================
 
 app.get("/", (req, res) => {
   res.json({
     name: "Lumora AI Backend",
     status: "online",
-    version: "3.0.0",
-
-    features: [
-      "AI Chat",
-      "Conversation Context",
-      "Code Context",
-      "Image Understanding",
-      "Screenshot Understanding",
-      "Google Search"
-    ]
+    provider: "Google Gemini"
   });
 });
 
-// ================================
+// ===============================
 // HEALTH CHECK
-// ================================
+// ===============================
 
 app.get("/health", (req, res) => {
   res.json({
-    ok: true,
-    status: "online",
-    version: "3.0.0"
+    status: "ok"
   });
 });
 
-// ================================
+// ===============================
 // CHAT API
-// ================================
+// ===============================
 
 app.post("/chat", async (req, res) => {
   try {
-    const message =
-      String(
-        req.body?.message || ""
-      ).trim();
-
-    const history =
-      req.body?.history || [];
-
-    const image =
-      req.body?.image || null;
-
-    if (!message && !image) {
-      return res.status(400).json({
-        error:
-          "Message or image is required."
+    if (!API_KEY) {
+      return res.status(500).json({
+        error: "GEMINI_API_KEY is not configured."
       });
     }
 
-    const result =
-      await askLumora(
-        message,
-        history,
-        image
-      );
+    const {
+      message,
+      history,
+      image
+    } = req.body || {};
 
-    res.json(result);
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({
+        error: "Message is required."
+      });
+    }
+
+    const body = {
+      systemInstruction: {
+        parts: [
+          {
+            text: SYSTEM
+          }
+        ]
+      },
+
+      contents: buildContents(
+        history,
+        message,
+        image
+      ),
+
+      generationConfig: {
+        temperature: 0.7
+      }
+    };
+
+    // Enable Google Search for current/web-related questions
+    if (needsSearch(message)) {
+      body.tools = [
+        {
+          googleSearch: {}
+        }
+      ];
+    }
+
+    let lastError = null;
+
+    for (const model of TEXT_MODELS) {
+      try {
+        const data = await callGemini(
+          model,
+          body
+        );
+
+        const reply = extractText(data);
+
+        if (reply) {
+          return res.json({
+            reply,
+            model
+          });
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    return res.status(502).json({
+      error:
+        lastError?.message ||
+        "Unable to generate response."
+    });
 
   } catch (error) {
-    console.error(
-      "CHAT ERROR:",
-      error
-    );
-
-    res.status(503).json({
+    return res.status(500).json({
       error:
         error?.message ||
-        "Lumora AI could not generate a response."
+        "Server error."
     });
   }
 });
 
-// ================================
+// ===============================
+// IMAGE GENERATION API
+// ===============================
+
+app.post("/generate-image", async (req, res) => {
+  try {
+    if (!API_KEY) {
+      return res.status(500).json({
+        error: "GEMINI_API_KEY is not configured."
+      });
+    }
+
+    const {
+      prompt,
+      aspectRatio = "1:1"
+    } = req.body || {};
+
+    if (!prompt || !String(prompt).trim()) {
+      return res.status(400).json({
+        error: "Image prompt is required."
+      });
+    }
+
+    const data = await callGemini(
+      IMAGE_MODEL,
+      {
+        contents: [
+          {
+            parts: [
+              {
+                text: String(prompt)
+              }
+            ]
+          }
+        ],
+
+        generationConfig: {
+          responseModalities: [
+            "TEXT",
+            "IMAGE"
+          ],
+
+          responseFormat: {
+            image: {
+              aspectRatio,
+              imageSize: "1K"
+            }
+          }
+        }
+      },
+      "v1"
+    );
+
+    const parts =
+      data?.candidates?.flatMap(
+        candidate =>
+          candidate?.content?.parts || []
+      ) || [];
+
+    const imagePart = parts.find(
+      part => part?.inlineData?.data
+    );
+
+    const text =
+      parts
+        .map(part => part?.text || "")
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+
+    if (!imagePart) {
+      return res.status(502).json({
+        error:
+          text ||
+          "Image was not returned."
+      });
+    }
+
+    const mimeType =
+      imagePart.inlineData.mimeType ||
+      "image/png";
+
+    const imageData =
+      imagePart.inlineData.data;
+
+    return res.json({
+      image:
+        `data:${mimeType};base64,${imageData}`,
+
+      text,
+
+      model: IMAGE_MODEL
+    });
+
+  } catch (error) {
+    return res.status(502).json({
+      error:
+        error?.message ||
+        "Image generation failed."
+    });
+  }
+});
+
+// ===============================
 // START SERVER
-// ================================
+// ===============================
 
 app.listen(
   PORT,
@@ -496,10 +395,6 @@ app.listen(
   () => {
     console.log(
       `Lumora AI Backend running on port ${PORT}`
-    );
-
-    console.log(
-      `Server listening on port ${PORT}`
     );
   }
 );
