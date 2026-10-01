@@ -4,65 +4,63 @@ import cors from "cors";
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.GEMINI_API_KEY;
+const HOST = "0.0.0.0";
 
-app.use(cors());
-app.use(express.json({ limit: "20mb" }));
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// ================================
+// --------------------------------------------------
 // MODELS
-// ================================
+// --------------------------------------------------
 
-const TEXT_MODEL = "gemini-3.8-flash";
-const IMAGE_MODEL = "gemini-3.1-flash-image";
+const TEXT_MODELS = [
+  "gemini-3.8-flash",
+  "gemini-3.8-flash-lite"
+];
 
-// ================================
-// LUMORA AI SYSTEM
-// ================================
+const IMAGE_MODELS = [
+  "gemini-3.1-flash-image"
+];
 
-const SYSTEM_PROMPT = `
+// --------------------------------------------------
+// MIDDLEWARE
+// --------------------------------------------------
+
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+  })
+);
+
+app.use(
+  express.json({
+    limit: "20mb"
+  })
+);
+
+// --------------------------------------------------
+// SYSTEM PROMPT
+// --------------------------------------------------
+
+const SYSTEM = `
 You are Lumora AI, a smart general-purpose AI assistant.
 
-IMPORTANT:
-The user's LATEST message is the CURRENT TASK.
+CREATOR:
 
-Every new message should be treated as the user's current request.
+You were created and developed by Ankush Mondal (অঙ্কুশ মণ্ডল).
 
-Do NOT continue an old task just because it appeared earlier.
+Only mention the creator when the user explicitly asks questions such as:
 
-Example:
+Who created you?
+Who made you?
+Who developed you?
+Who is your creator?
+কে আপনাকে তৈরি করেছে?
+আপনাকে কে বানিয়েছে?
+আপনাকে কে ডেভেলপ করেছে?
 
-User: What is HTML?
-Assistant: Explain HTML.
-
-User: Who created you?
-Assistant: Answer only who created you.
-
-User: Create an app icon for me.
-Assistant: Generate an image.
-
-User: How can I learn JavaScript?
-Assistant: Answer the JavaScript question.
-
-The previous topic must NEVER override the latest user request.
-
-However, if the user clearly says:
-"fix the previous HTML"
-"continue that code"
-"change the image you made"
-or similar,
-then use the relevant previous context.
-
-If the user asks for code:
-Create or explain the requested code.
-
-If the user asks to fix code:
-Fix that specific code.
-
-If the user asks for an email:
-Return a ready-to-copy email with Subject and Body.
-
-If the user asks who created or developed you:
+For those questions, answer:
 
 Bengali:
 আমি Lumora AI। আমাকে তৈরি ও ডেভেলপ করেছেন অঙ্কুশ মণ্ডল (Ankush Mondal)।
@@ -70,258 +68,495 @@ Bengali:
 English:
 I am Lumora AI. I was created and developed by Ankush Mondal.
 
-Only give the creator information when the user explicitly asks.
+Do not mention the creator unnecessarily.
 
-Always answer in the same language as the latest user message.
+==================================================
+MOST IMPORTANT CONVERSATION RULE
+==================================================
 
-Be helpful, natural and conversational.
+THE LATEST USER MESSAGE IS THE CURRENT TASK.
 
-Do not unnecessarily repeat previous answers.
+Normally answer ONLY the latest user message.
+
+Do NOT automatically answer previous questions.
+
+Do NOT repeat previous answers.
+
+Do NOT combine previous questions with the current question.
+
+Do NOT summarize previous questions unless the user explicitly asks.
+
+Do NOT continue an old topic automatically.
+
+Every new user message should normally be treated as a NEW TASK.
+
+Example:
+
+User:
+What is HTML?
+
+Assistant:
+HTML is...
+
+User:
+What is Python?
+
+Assistant:
+Python is...
+
+IMPORTANT:
+The second answer must NOT explain HTML again.
+
+Example:
+
+User:
+What is HTML?
+
+Assistant:
+HTML is...
+
+User:
+What is the capital of India?
+
+Assistant:
+The capital of India is New Delhi.
+
+Do NOT answer HTML again.
+
+==================================================
+WHEN PREVIOUS CONTEXT MAY BE USED
+==================================================
+
+Previous conversation context may ONLY be used when the latest user message clearly refers to something earlier.
+
+Examples:
+
+"আগের code ঠিক করো"
+"আগের HTML ঠিক করো"
+"ওই code-এ button কাজ করছে না"
+"আগেরটা continue করো"
+"এটার দ্বিতীয় অংশ দাও"
+"same code modify করো"
+"fix the code you gave"
+"continue from the previous answer"
+
+In these cases, use the relevant previous context.
+
+But if the latest message is an unrelated question, ignore previous task context.
+
+==================================================
+LATEST MESSAGE HAS PRIORITY
+==================================================
+
+Always prioritize the latest user message.
+
+If previous context conflicts with the latest message,
+follow the latest message.
+
+==================================================
+LANGUAGE
+==================================================
+
+Answer in the same language as the latest user message.
+
+If the user writes Bengali, answer naturally in Bengali.
+
+If the user writes English, answer in English.
+
+If the user mixes Bengali and English, respond naturally in the same mixed style.
+
+==================================================
+CODE
+==================================================
+
+When the user asks for code:
+
+- Give working code.
+- Do not unnecessarily change unrelated parts.
+- If the user asks to fix previous code, use previous context only when explicitly referenced.
+- Preserve requested features unless the user asks to remove them.
+
+==================================================
+EMAIL
+==================================================
+
+When the user asks for an email, provide:
+
+Subject:
+...
+
+Body:
+...
+
+Make it ready to copy.
+
+==================================================
+IMAGE REQUESTS
+==================================================
+
+If the user asks to create, generate, make, design, draw or produce:
+
+- image
+- picture
+- photo
+- logo
+- app icon
+- icon
+- sticker
+- poster
+- illustration
+- wallpaper
+- avatar
+- character
+- banner
+- thumbnail
+
+then treat it as an IMAGE GENERATION TASK.
+
+Do not answer with a long text explanation instead of generating the image.
+
+==================================================
+GENERAL BEHAVIOR
+==================================================
+
+Be helpful, clear and natural.
+
+Do not repeat the user's previous questions.
+
+Do not invent conversation context.
+
+Do not assume that every new message is a continuation.
+
+A new topic is a new task.
+
+Only use old context when the user clearly refers to it.
 `;
 
-// ================================
-// IMAGE REQUEST DETECTION
-// ================================
+// --------------------------------------------------
+// BASIC HELPERS
+// --------------------------------------------------
 
-function isImageRequest(text) {
-  const t = String(text || "").toLowerCase();
+function requireApiKey() {
+  if (!GEMINI_API_KEY) {
+    throw new Error(
+      "GEMINI_API_KEY is missing in Render Environment Variables."
+    );
+  }
+}
+
+function cleanText(value) {
+  return String(value || "").trim();
+}
+
+// --------------------------------------------------
+// CONTEXT DETECTION
+// --------------------------------------------------
+
+function shouldUsePreviousContext(message) {
+  const text = cleanText(message).toLowerCase();
+
+  if (!text) return false;
 
   const patterns = [
-    /generate.*image/i,
-    /generate.*picture/i,
-    /generate.*photo/i,
-    /generate.*logo/i,
-    /generate.*icon/i,
-    /generate.*sticker/i,
 
-    /create.*image/i,
-    /create.*picture/i,
-    /create.*photo/i,
-    /create.*logo/i,
-    /create.*icon/i,
-    /create.*sticker/i,
+    // Bengali
+    "আগের",
+    "আগেরটা",
+    "আগের কোড",
+    "আগের code",
+    "আগের html",
+    "আগের css",
+    "আগের javascript",
+    "আগের উত্তর",
+    "আগের প্রশ্ন",
+    "ওইটা",
+    "ওইটা ঠিক",
+    "ওই কোড",
+    "ওই code",
+    "ওই html",
+    "ওই উত্তর",
+    "এটা ঠিক করো",
+    "এটা ঠিক করে দাও",
+    "এটা ঠিক করুন",
+    "এটার",
+    "ওটার",
+    "তারপর",
+    "চালিয়ে যাও",
+    "চালিয়ে যাও",
+    "continue করো",
+    "continue করুন",
+    "আবার দাও",
+    "পরের অংশ",
+    "দ্বিতীয় অংশ",
+    "দ্বিতীয় অংশ",
 
-    /make.*image/i,
-    /make.*picture/i,
-    /make.*photo/i,
-    /make.*logo/i,
-    /make.*icon/i,
-    /make.*sticker/i,
-
-    /draw.*image/i,
-    /draw.*picture/i,
-    /draw.*logo/i,
-    /draw.*icon/i,
-
-    /ইমেজ.*জেনারেট/i,
-    /ইমেজ.*তৈরি/i,
-    /ইমেজ.*বানাও/i,
-    /ইমেজ.*দাও/i,
-
-    /ছবি.*জেনারেট/i,
-    /ছবি.*তৈরি/i,
-    /ছবি.*বানাও/i,
-    /ছবি.*দাও/i,
-
-    /লোগো.*জেনারেট/i,
-    /লোগো.*তৈরি/i,
-    /লোগো.*বানাও/i,
-    /লোগো.*দাও/i,
-
-    /আইকন.*জেনারেট/i,
-    /আইকন.*তৈরি/i,
-    /আইকন.*বানাও/i,
-    /আইকন.*দাও/i,
-
-    /স্টিকার.*জেনারেট/i,
-    /স্টিকার.*তৈরি/i,
-    /স্টিকার.*বানাও/i,
-    /স্টিকার.*দাও/i,
-
-    /অ্যাপ আইকন/i,
-    /app icon/i
+    // English
+    "previous",
+    "previous code",
+    "previous html",
+    "previous answer",
+    "previous question",
+    "earlier",
+    "earlier code",
+    "earlier answer",
+    "the code you gave",
+    "the html you gave",
+    "the answer you gave",
+    "continue",
+    "continue from",
+    "continue the",
+    "fix this",
+    "fix it",
+    "fix the code",
+    "modify this",
+    "modify it",
+    "same code",
+    "same html",
+    "that code",
+    "that html",
+    "the above code",
+    "above code"
   ];
 
-  return patterns.some(pattern => pattern.test(t));
+  return patterns.some((pattern) => text.includes(pattern));
 }
 
-// ================================
-// EXTRACT TEXT
-// ================================
+// --------------------------------------------------
+// IMAGE REQUEST DETECTION
+// --------------------------------------------------
+
+function isImageRequest(message) {
+  const text = cleanText(message).toLowerCase();
+
+  if (!text) return false;
+
+  const imagePatterns = [
+
+    // English
+    "generate an image",
+    "generate image",
+    "create an image",
+    "create image",
+    "make an image",
+    "make image",
+    "draw an image",
+    "draw image",
+    "generate a picture",
+    "create a picture",
+    "make a picture",
+    "generate a photo",
+    "create a photo",
+    "make a photo",
+    "generate a logo",
+    "create a logo",
+    "make a logo",
+    "design a logo",
+    "generate an icon",
+    "create an icon",
+    "make an icon",
+    "design an icon",
+    "generate a sticker",
+    "create a sticker",
+    "make a sticker",
+    "generate a poster",
+    "create a poster",
+    "make a poster",
+    "generate a wallpaper",
+    "create a wallpaper",
+    "make a wallpaper",
+    "generate an avatar",
+    "create an avatar",
+    "make an avatar",
+    "generate a character",
+    "create a character",
+    "make a character",
+    "generate a banner",
+    "create a banner",
+    "make a banner",
+    "generate a thumbnail",
+    "create a thumbnail",
+    "make a thumbnail",
+
+    // Bengali
+    "ছবি তৈরি",
+    "ছবি বানাও",
+    "ছবি বানিয়ে",
+    "ছবি বানিয়ে",
+    "একটা ছবি",
+    "ইমেজ তৈরি",
+    "ইমেজ বানাও",
+    "ইমেজ তৈরি কর",
+    "লোগো তৈরি",
+    "লোগো বানাও",
+    "লোগো তৈরি কর",
+    "আইকন তৈরি",
+    "আইকন বানাও",
+    "অ্যাপ আইকন",
+    "অ্যাপের আইকন",
+    "স্টিকার তৈরি",
+    "স্টিকার বানাও",
+    "পোস্টার তৈরি",
+    "পোস্টার বানাও",
+    "ওয়ালপেপার তৈরি",
+    "ওয়ালপেপার তৈরি",
+    "ওয়ালপেপার বানাও",
+    "ওয়ালপেপার বানাও",
+    "অ্যাভাটার তৈরি",
+    "অ্যাভাটার বানাও",
+    "কার্টুন তৈরি",
+    "কার্টুন বানাও"
+  ];
+
+  return imagePatterns.some((pattern) => text.includes(pattern));
+}
+
+// --------------------------------------------------
+// GEMINI API
+// --------------------------------------------------
+
+async function callGemini(model, body) {
+  requireApiKey();
+
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/` +
+    `${encodeURIComponent(model)}:generateContent`;
+
+  const response = await fetch(url, {
+    method: "POST",
+
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": GEMINI_API_KEY
+    },
+
+    body: JSON.stringify(body)
+  });
+
+  const raw = await response.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `Gemini returned invalid JSON. HTTP ${response.status}: ${raw.slice(
+        0,
+        500
+      )}`
+    );
+  }
+
+  if (!response.ok) {
+    const message =
+      data?.error?.message ||
+      `Gemini API error. HTTP ${response.status}`;
+
+    throw new Error(message);
+  }
+
+  return data;
+}
+
+// --------------------------------------------------
+// EXTRACT TEXT FROM GEMINI
+// --------------------------------------------------
 
 function extractText(data) {
-  return (
-    data?.candidates?.[0]?.content?.parts
-      ?.map(part => part.text || "")
-      .filter(Boolean)
-      .join("\n")
-      .trim() || ""
-  );
-}
+  const candidates = data?.candidates;
 
-// ================================
-// TEXT GENERATION
-// ================================
-
-async function generateText(contents) {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent`,
-    {
-      method: "POST",
-
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": API_KEY
-      },
-
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [
-            {
-              text: SYSTEM_PROMPT
-            }
-          ]
-        },
-
-        contents,
-
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 4096
-        }
-      })
-    }
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message ||
-      `Gemini error ${response.status}`
-    );
-  }
-
-  const text = extractText(data);
-
-  if (!text) {
-    throw new Error(
-      "Gemini returned an empty response."
-    );
-  }
-
-  return text;
-}
-
-// ================================
-// IMAGE GENERATION
-// ================================
-
-async function generateImage(prompt) {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${IMAGE_MODEL}:generateContent`,
-    {
-      method: "POST",
-
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": API_KEY
-      },
-
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-
-            parts: [
-              {
-                text: String(prompt)
-              }
-            ]
-          }
-        ],
-
-        generationConfig: {
-          responseModalities: [
-            "TEXT",
-            "IMAGE"
-          ],
-
-          responseFormat: {
-            image: {
-              aspectRatio: "1:1",
-              imageSize: "1K"
-            }
-          }
-        }
-      })
-    }
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message ||
-      `Image generation error ${response.status}`
-    );
+  if (!Array.isArray(candidates)) {
+    return "";
   }
 
   const parts =
-    data?.candidates?.[0]?.content?.parts || [];
+    candidates[0]?.content?.parts || [];
 
-  let imageData = null;
-  let mimeType = "image/png";
-  let text = "";
-
-  for (const part of parts) {
-    if (part?.inlineData?.data) {
-      imageData = part.inlineData.data;
-
-      mimeType =
-        part.inlineData.mimeType ||
-        "image/png";
-    }
-
-    if (part?.text) {
-      text += part.text + "\n";
-    }
-  }
-
-  if (!imageData) {
-    throw new Error(
-      text.trim() ||
-      "The image model did not return an image."
-    );
-  }
-
-  return {
-    image:
-      `data:${mimeType};base64,${imageData}`,
-
-    text: text.trim()
-  };
+  return parts
+    .filter((part) => typeof part?.text === "string")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
 }
 
-// ================================
-// BUILD CONVERSATION
-// ================================
+// --------------------------------------------------
+// EXTRACT IMAGE FROM GEMINI
+// --------------------------------------------------
 
-function buildContents(history, latestMessage) {
+function extractImage(data) {
+  const candidates = data?.candidates;
+
+  if (!Array.isArray(candidates)) {
+    return null;
+  }
+
+  const parts =
+    candidates[0]?.content?.parts || [];
+
+  for (const part of parts) {
+    const inlineData =
+      part?.inlineData ||
+      part?.inline_data;
+
+    if (
+      inlineData?.data &&
+      inlineData?.mimeType
+    ) {
+      return {
+        mimeType: inlineData.mimeType,
+        data: inlineData.data
+      };
+    }
+  }
+
+  return null;
+}
+
+// --------------------------------------------------
+// BUILD TEXT CONTENTS
+// --------------------------------------------------
+
+function buildTextContents(
+  history,
+  latestMessage,
+  image
+) {
   const contents = [];
 
-  if (Array.isArray(history)) {
+  const useContext =
+    shouldUsePreviousContext(latestMessage);
 
-    const recentHistory =
+  /*
+   * IMPORTANT:
+   *
+   * If this is a completely new task,
+   * we DO NOT send old conversation messages.
+   *
+   * This prevents:
+   *
+   * HTML question
+   * +
+   * Python question
+   *
+   * from being answered together.
+   */
+
+  if (
+    useContext &&
+    Array.isArray(history)
+  ) {
+    const previousMessages =
       history
-        .filter(item =>
-          item &&
-          item.content
+        .filter(
+          (item) =>
+            item &&
+            item.content &&
+            (item.role === "user" ||
+              item.role === "assistant")
         )
-        .slice(-10);
+        .slice(-8);
 
-    for (const item of recentHistory) {
-
+    for (const item of previousMessages) {
       contents.push({
         role:
           item.role === "assistant"
@@ -337,253 +572,361 @@ function buildContents(history, latestMessage) {
     }
   }
 
-  // Latest message is ALWAYS last.
+  const latestParts = [
+    {
+      text:
+        "CURRENT USER TASK:\n\n" +
+        String(latestMessage) +
+        "\n\n" +
+        "Answer ONLY this current task.\n" +
+        "Do not answer previous questions unless this message explicitly refers to them."
+    }
+  ];
+
+  if (image?.data) {
+    latestParts.push({
+      inlineData: {
+        mimeType:
+          image.mimeType || "image/png",
+
+        data: image.data
+      }
+    });
+  }
+
   contents.push({
     role: "user",
-
-    parts: [
-      {
-        text:
-          `CURRENT TASK:
-
-${String(latestMessage)}
-
-IMPORTANT:
-Answer the CURRENT TASK above.
-Do not continue an older task unless the user explicitly asks you to.`
-      }
-    ]
+    parts: latestParts
   });
 
   return contents;
 }
 
-// ================================
-// HOME
-// ================================
+// --------------------------------------------------
+// GENERATE TEXT
+// --------------------------------------------------
+
+async function generateText(
+  latestMessage,
+  history = [],
+  image = null
+) {
+  let lastError = null;
+
+  const body = {
+    systemInstruction: {
+      parts: [
+        {
+          text: SYSTEM
+        }
+      ]
+    },
+
+    contents: buildTextContents(
+      history,
+      latestMessage,
+      image
+    ),
+
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 4096
+    }
+  };
+
+  for (const model of TEXT_MODELS) {
+    try {
+      const data =
+        await callGemini(model, body);
+
+      const reply =
+        extractText(data);
+
+      if (reply) {
+        return reply;
+      }
+
+      lastError = new Error(
+        "Gemini returned an empty text response."
+      );
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw (
+    lastError ||
+    new Error("Unable to generate text.")
+  );
+}
+
+// --------------------------------------------------
+// GENERATE IMAGE
+// --------------------------------------------------
+
+async function generateImage(prompt) {
+  let lastError = null;
+
+  const body = {
+    systemInstruction: {
+      parts: [
+        {
+          text:
+            "You are Lumora AI's image generation engine. " +
+            "Generate the requested image faithfully. " +
+            "Do not replace an image request with a text explanation."
+        }
+      ]
+    },
+
+    contents: [
+      {
+        role: "user",
+
+        parts: [
+          {
+            text:
+              `Create the requested image.\n\n` +
+              `USER REQUEST:\n${prompt}`
+          }
+        ]
+      }
+    ],
+
+    generationConfig: {
+      responseModalities: ["TEXT", "IMAGE"]
+    }
+  };
+
+  for (const model of IMAGE_MODELS) {
+    try {
+      const data =
+        await callGemini(model, body);
+
+      const image =
+        extractImage(data);
+
+      if (image) {
+        const dataUrl =
+          `data:${image.mimeType};base64,${image.data}`;
+
+        const description =
+          extractText(data);
+
+        return {
+          image: dataUrl,
+          description:
+            description ||
+            "Image generated successfully."
+        };
+      }
+
+      lastError = new Error(
+        "The image model did not return an image."
+      );
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw (
+    lastError ||
+    new Error("Unable to generate image.")
+  );
+}
+
+// --------------------------------------------------
+// ROOT
+// --------------------------------------------------
 
 app.get("/", (req, res) => {
   res.json({
     name: "Lumora AI Backend",
     status: "online",
-    provider: "Google Gemini"
+    provider: "Google Gemini",
+    version: "6.0.0"
   });
 });
 
-// ================================
+// --------------------------------------------------
 // HEALTH
-// ================================
+// --------------------------------------------------
 
 app.get("/health", (req, res) => {
   res.json({
-    status: "ok"
+    status: "ok",
+    service: "Lumora AI Backend",
+    gemini:
+      Boolean(GEMINI_API_KEY)
+        ? "configured"
+        : "missing"
   });
 });
 
-// ================================
+// --------------------------------------------------
 // CHAT
-// ================================
+// --------------------------------------------------
 
 app.post("/chat", async (req, res) => {
-
   try {
-
-    if (!API_KEY) {
-      return res.status(500).json({
-        error:
-          "GEMINI_API_KEY is missing in Render Environment Variables."
-      });
-    }
-
     const {
       message,
       history,
       image
     } = req.body || {};
 
-    if (
-      !message ||
-      !String(message).trim()
-    ) {
+    const latestMessage =
+      cleanText(message);
+
+    if (!latestMessage) {
       return res.status(400).json({
         error: "Message is required."
       });
     }
 
-    const currentMessage =
-      String(message).trim();
+    /*
+     * IMAGE REQUEST
+     *
+     * Image generation is checked BEFORE normal
+     * text generation.
+     */
 
-    // ==================================
-    // IMAGE REQUEST
-    // ==================================
-
-    if (
-      isImageRequest(currentMessage)
-    ) {
-
+    if (isImageRequest(latestMessage)) {
       const result =
         await generateImage(
-          currentMessage
+          latestMessage
         );
 
       return res.json({
+        ok: true,
 
         type: "image",
 
         image: result.image,
 
         reply:
-          result.text ||
-          "আপনার জন্য ছবিটি তৈরি করেছি।"
+          result.description,
 
+        message:
+          "Image generated successfully."
       });
     }
 
-    // ==================================
-    // NORMAL CHAT
-    // ==================================
-
-    const contents =
-      buildContents(
-        history,
-        currentMessage
-      );
-
-    // ==================================
-    // ATTACHED IMAGE
-    // ==================================
-
-    if (image?.data) {
-
-      contents[
-        contents.length - 1
-      ].parts.push({
-
-        inlineData: {
-
-          mimeType:
-            image.mimeType ||
-            "image/png",
-
-          data:
-            image.data
-
-        }
-
-      });
-    }
+    /*
+     * NORMAL TEXT TASK
+     */
 
     const reply =
       await generateText(
-        contents
+        latestMessage,
+        Array.isArray(history)
+          ? history
+          : [],
+        image || null
       );
 
     return res.json({
+      ok: true,
 
       type: "text",
 
       reply
-
     });
 
   } catch (error) {
-
     console.error(
-      "Lumora error:",
+      "CHAT ERROR:",
       error
     );
 
     return res.status(500).json({
+      ok: false,
 
       error:
         error?.message ||
-        "Lumora AI server error."
-
+        "Something went wrong."
     });
   }
 });
 
-// ================================
-// DIRECT IMAGE API
-// ================================
+// --------------------------------------------------
+// DIRECT IMAGE GENERATION
+// --------------------------------------------------
 
 app.post(
   "/generate-image",
   async (req, res) => {
-
     try {
+      const prompt =
+        cleanText(
+          req.body?.prompt
+        );
 
-      if (!API_KEY) {
-        return res.status(500).json({
-          error:
-            "GEMINI_API_KEY is missing."
-        });
-      }
-
-      const {
-        prompt
-      } = req.body || {};
-
-      if (
-        !prompt ||
-        !String(prompt).trim()
-      ) {
-
+      if (!prompt) {
         return res.status(400).json({
-          error:
-            "Image prompt is required."
+          error: "Image prompt is required."
         });
-
       }
 
       const result =
-        await generateImage(
-          prompt
-        );
+        await generateImage(prompt);
 
       return res.json({
+        ok: true,
 
         type: "image",
 
-        image:
-          result.image,
+        image: result.image,
 
-        text:
-          result.text
-
+        reply:
+          result.description
       });
 
     } catch (error) {
-
       console.error(
-        "Image error:",
+        "IMAGE ERROR:",
         error
       );
 
       return res.status(500).json({
+        ok: false,
 
         error:
           error?.message ||
           "Image generation failed."
-
       });
-
     }
   }
 );
 
-// ================================
+// --------------------------------------------------
+// 404
+// --------------------------------------------------
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Endpoint not found."
+  });
+});
+
+// --------------------------------------------------
 // START SERVER
-// ================================
+// --------------------------------------------------
 
 app.listen(
   PORT,
-  "0.0.0.0",
+  HOST,
   () => {
-
     console.log(
-      `Lumora AI Backend running on port ${PORT}`
+      `Lumora AI Backend running on ${HOST}:${PORT}`
     );
 
+    console.log(
+      `Gemini API key: ${
+        GEMINI_API_KEY
+          ? "configured"
+          : "MISSING"
+      }`
+    );
   }
 );
